@@ -20,4 +20,6 @@ models/artifacts/
 **/*.pyc
 .coverage.*
 coverage.out
+cover.out
+coverage
 *.prof
