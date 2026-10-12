@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Python dependencies
+        run: pip install -r requirements.txt
+      - name: Go gateway tests
+        working-directory: gateway
+        run: go test -cover ./...
+      - name: Go load generator tests
+        working-directory: loadgen
+        run: go test ./...
+      - name: Rust tests
+        working-directory: featureserver
+        run: cargo test
+      - name: Python tests
+        run: python -m pytest tests/test_library.py -q
+      - name: Quick pipeline
+        run: python run.py --quick
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Model image
+        run: docker build -f models/Dockerfile -t ml-ranking:local .
+      - name: Gateway image
+        run: docker build -f gateway/Dockerfile -t ml-gateway:local gateway
+      - name: Feature server image
+        run: docker build -f featureserver/Dockerfile -t ml-featureserver:local featureserver
