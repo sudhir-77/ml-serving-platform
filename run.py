@@ -1,8 +1,9 @@
-"""Reproduce the local serving benchmarks.
+"""Reproduce the serving benchmarks.
 
 Usage:
     python run.py
     python run.py --quick
+    python run.py --local
     python run.py --skip-build
 """
 
@@ -11,7 +12,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import statistics
 import subprocess
 import sys
 import threading
@@ -26,17 +26,18 @@ os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import requests
+import requests  # noqa: E402
 
-from mlserving.configgen import make_gateway_config, make_workload
-from mlserving.data import ensure_dataset, load_movies, load_ratings
-from mlserving.features import feature_events, vector_for
-from mlserving.hardware import PeakTracker, hardware_snapshot
-from mlserving.autoscale import desired_replicas
-from mlserving.metrics import assemble_from_results, build_report, paired_overhead_p95, write_report
-from mlserving.plots import write_plots
-from mlserving.resume import write_resume
-from mlserving.train import train_movielens, write_parity_csv
+from mlserving.autoscale import desired_replicas  # noqa: E402
+from mlserving.configgen import make_gateway_config, make_workload  # noqa: E402
+from mlserving.data import ensure_dataset, load_movies, load_ratings  # noqa: E402
+from mlserving.events import EventLog  # noqa: E402
+from mlserving.features import feature_events, vector_for  # noqa: E402
+from mlserving.hardware import PeakTracker, hardware_snapshot  # noqa: E402
+from mlserving.metrics import assemble_from_results, build_report, paired_overhead_p95, write_report  # noqa: E402
+from mlserving.plots import write_plots  # noqa: E402
+from mlserving.resume import write_resume  # noqa: E402
+from mlserving.train import train_movielens, write_parity_csv  # noqa: E402
 
 GATEWAY_PORT = 18180
 NAIVE_PORT = 18181
@@ -65,7 +66,7 @@ def profile(quick: bool) -> dict:
             "feature_concurrency": 8,
             "hpa_n": 160,
             "hpa_rps": 80,
-            "canary_n": 160,
+            "canary_n": 320,
             "canary_rps": 80,
             "concurrency": 4,
         }
@@ -320,20 +321,6 @@ def concat_csv(parts: list[Path], dest: Path) -> None:
                     handle.write(line + "\n")
 
 
-class EventLog:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = path.open("w", encoding="utf-8", newline="")
-        self.handle.write("ts,object,event\n")
-
-    def add(self, obj: str, event: str) -> None:
-        self.handle.write(f"{time.time():.3f},{obj},{event}\n")
-        self.handle.flush()
-
-    def close(self) -> None:
-        self.handle.close()
-
-
 def push_features(url: str, events: list[dict]) -> None:
     response = requests.post(f"{url}/v1/events", json={"events": events}, timeout=60)
     response.raise_for_status()
@@ -369,6 +356,9 @@ def gateway_cfg(listen_port: int, mode: str, ranking: list[dict], hedge_ms: int,
         hedge_after_ms=hedge_ms,
         fetch_features=(mode == "gateway"),
         canary_weight=canary_weight,
+        canary_min_samples=5,
+        canary_window_ms=30000,
+        canary_error_threshold=0.4,
     )
     cfg["breaker_failures"] = breaker
     return cfg
@@ -549,7 +539,7 @@ def run_features(load_bin, rows, prof, results) -> None:
             load_bin,
             url=f"http://127.0.0.1:{RUST_PORT}",
             scenario="features",
-            mode="gateway",
+            mode="rust",
             target="features",
             rows=rows,
             out=rust_part,
@@ -563,7 +553,7 @@ def run_features(load_bin, rows, prof, results) -> None:
             load_bin,
             url=f"http://127.0.0.1:{PY_PORT}",
             scenario="features",
-            mode="naive",
+            mode="python",
             target="features",
             rows=rows,
             out=py_part,
@@ -631,12 +621,10 @@ def run_hpa(sup, binary, load_bin, rows, prof, results, model_path) -> None:
             proc.kill()
             proc.wait(timeout=5)
         sup.stop(gw)
+        if reaction is None:
+            reaction = 999.0
+            events.add("rank-c", "scale_out_timeout")
         events.close()
-    if reaction is None:
-        reaction = 999.0
-        events_path = results / "k8s_events_hpa.csv"
-        with events_path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{time.time():.3f},rank-c,scale_out_timeout\n")
     part.replace(results / "loadtest_hpa.csv")
     (results / "hpa_meta.json").write_text(json.dumps({"hpa_reaction_s": reaction}), encoding="utf-8")
 
@@ -765,12 +753,41 @@ def scenario_enabled(only: str, name: str) -> bool:
     return not only or only == name
 
 
+def _run_local(sup, args, prof, results, ranking, users, items, test_idx, rows_path, overhead_path, model_path, text_path) -> None:
+    gateway_bin, load_bin, feature_bin = build_binaries(args.skip_build)
+    start_rust(sup, feature_bin)
+    start_python_features(sup)
+    rank_a = start_model(sup, RANK_A, "ranking", model_path, 0.0)
+    sup.procs_by_port[RANK_A] = rank_a
+    start_model(sup, RANK_B, "ranking", model_path, 0.0)
+    start_model(sup, RANK_V2, "ranking", model_path, 0.9)
+    start_model(sup, TEXT_PORT, "text", text_path, 0.0)
+    events = feature_events(ranking["aggregates"])
+    push_features(f"http://127.0.0.1:{RUST_PORT}", events)
+    push_features(f"http://127.0.0.1:{PY_PORT}", events)
+    check_vectors(ranking["aggregates"], users, items, test_idx)
+    if scenario_enabled(args.only, "overhead"):
+        run_overhead(sup, gateway_bin, load_bin, overhead_path, prof, results)
+    if scenario_enabled(args.only, "features"):
+        run_features(load_bin, rows_path, prof, results)
+    if scenario_enabled(args.only, "spike"):
+        run_spike(sup, gateway_bin, load_bin, rows_path, prof, results)
+    if scenario_enabled(args.only, "canary"):
+        run_canary(sup, gateway_bin, load_bin, rows_path, prof, results)
+    if scenario_enabled(args.only, "hpa"):
+        run_hpa(sup, gateway_bin, load_bin, rows_path, prof, results, model_path)
+    if scenario_enabled(args.only, "podkill"):
+        run_podkill(sup, gateway_bin, load_bin, rows_path, prof, results, model_path)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train models and run local serving scenarios")
-    parser.add_argument("--quick", action="store_true", help="small subset, under a few minutes once binaries exist")
+    parser = argparse.ArgumentParser(description="Train models and run serving scenarios")
+    parser.add_argument("--quick", action="store_true", help="local processes, small subset, under a few minutes once binaries exist")
+    parser.add_argument("--local", action="store_true", help="run processes on this machine instead of a kind cluster")
     parser.add_argument("--skip-build", action="store_true")
-    parser.add_argument("--only", default="", help="run one scenario: overhead, features, spike, podkill, hpa, canary")
+    parser.add_argument("--only", default="", help="local mode only: overhead, features, spike, podkill, hpa, canary")
     args = parser.parse_args()
+    use_kind = not args.local and not args.quick
     os.chdir(ROOT)
     (ROOT / "results").mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
@@ -799,13 +816,18 @@ def main() -> None:
                 {
                     "test_rmse": ranking["test_rmse"],
                     "baseline_rmse": ranking["baseline_rmse"],
-                    "execution_mode": "local_processes",
+                    "execution_mode": "kind" if use_kind else "local_processes",
                     "splits": {"movielens_100k": ranking["split_sizes"]},
                 }
             ),
             encoding="utf-8",
         )
-        prof = profile(args.quick)
+        if use_kind:
+            from kind_runner import kind_profile
+
+            prof = kind_profile()
+        else:
+            prof = profile(args.quick)
         test_idx = ranking["split"]["test"]
         workload = make_workload(
             users[test_idx],
@@ -818,52 +840,60 @@ def main() -> None:
         )
         rows_path = ROOT / "data" / "models" / "workload.json"
         rows_path.write_text(json.dumps(workload), encoding="utf-8")
-        overhead_idx = test_idx[:32]
+        unique_rows: list[int] = []
+        seen_rows: set[int] = set()
+        for raw_idx in test_idx.tolist():
+            idx = int(raw_idx)
+            if idx not in seen_rows:
+                seen_rows.add(idx)
+                unique_rows.append(idx)
+        if len(unique_rows) < 500:
+            raise RuntimeError(f"test split has only {len(unique_rows)} row ids")
+        overhead_count = max(700, prof["overhead_n"] + prof["overhead_warmup"])
+        overhead_idx = unique_rows[:overhead_count]
         overhead_rows = make_workload(
             users[overhead_idx],
             items[overhead_idx],
             overhead_idx,
             ranking["aggregates"],
-            n=max(32, prof["overhead_n"]),
+            n=overhead_count,
             seed=1,
             texts=titles[:10],
+            exhaustive=True,
         )
         overhead_path = ROOT / "data" / "models" / "workload_overhead.json"
         overhead_path.write_text(json.dumps(overhead_rows), encoding="utf-8")
 
-        gateway_bin, load_bin, feature_bin = build_binaries(args.skip_build)
         model_path = ROOT / "data" / "models" / "ranking.onnx"
         text_path = ROOT / "data" / "models" / "text.onnx"
-        start_rust(sup, feature_bin)
-        start_python_features(sup)
-        rank_a = start_model(sup, RANK_A, "ranking", model_path, 0.0)
-        sup.procs_by_port[RANK_A] = rank_a
-        start_model(sup, RANK_B, "ranking", model_path, 0.0)
-        start_model(sup, RANK_V2, "ranking", model_path, 0.9)
-        start_model(sup, TEXT_PORT, "text", text_path, 0.0)
-        events = feature_events(ranking["aggregates"])
-        push_features(f"http://127.0.0.1:{RUST_PORT}", events)
-        push_features(f"http://127.0.0.1:{PY_PORT}", events)
-        check_vectors(ranking["aggregates"], users, items, test_idx)
+        if use_kind:
+            from kind_runner import run_kind
 
-        if scenario_enabled(args.only, "overhead"):
-            run_overhead(sup, gateway_bin, load_bin, overhead_path, prof, results)
-        if scenario_enabled(args.only, "features"):
-            run_features(load_bin, rows_path, prof, results)
-        if scenario_enabled(args.only, "spike"):
-            run_spike(sup, gateway_bin, load_bin, rows_path, prof, results)
-        if scenario_enabled(args.only, "canary"):
-            run_canary(sup, gateway_bin, load_bin, rows_path, prof, results)
-        if scenario_enabled(args.only, "hpa"):
-            run_hpa(sup, gateway_bin, load_bin, rows_path, prof, results, model_path)
-        if scenario_enabled(args.only, "podkill"):
-            run_podkill(sup, gateway_bin, load_bin, rows_path, prof, results, model_path)
-
-        if args.only:
-            log(f"finished scenario {args.only}")
-            return
+            run_kind(ROOT, rows_path, overhead_path, feature_events(ranking["aggregates"]), prof)
+        else:
+            _run_local(
+                sup,
+                args,
+                prof,
+                results,
+                ranking,
+                users,
+                items,
+                test_idx,
+                rows_path,
+                overhead_path,
+                model_path,
+                text_path,
+            )
+            if args.only:
+                log(f"finished scenario {args.only}")
+                return
 
         sup.stop_all()
+        (results / "run_meta.json").write_text(
+            json.dumps({"fs_offered_rps": int(prof["feature_rps"])}),
+            encoding="utf-8",
+        )
         if args.quick:
             cover = {"go_coverage": 0.0, "python_coverage": 0.0, "rust_tests_passed": False}
         else:

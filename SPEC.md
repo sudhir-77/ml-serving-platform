@@ -89,3 +89,28 @@ Naive pass-through proxy to a single model replica with no retries, hedging, cir
 - Built a disaggregated model-serving stack on Kubernetes (kind) with a Go gateway, a Rust feature server and Dockerized ONNX models, keeping [SUCCESS]% of requests successful while pods were killed under load vs. [BASE_SUCCESS]% for a naive proxy
 - Cut p99 latency by [P99_CUT]% during a simulated replica slowdown with hedged, latency-aware routing at under [OVERHEAD] ms p95 gateway overhead
 - Wrote a Rust (tokio) online feature server fed by Kafka-compatible events with [FS_P99] ms p99 lookups at 2,000 RPS ([FS_SPEEDUP]x faster than a Python baseline), plus HPA autoscaling and automatic canary rollback
+
+## Scope change (2026-10-12, overrides earlier sections; reviewer)
+
+Iteration 1 ran every scenario as local processes (`execution_mode: local_processes`); the "pod kills", scale-outs and
+canary rollbacks were process restarts, so the Kubernetes claims are not supported. Docker Desktop 29.8 is now running
+with a 4 GB WSL VM cap, and kind v0.33 + kubectl v1.37 are installed. Required changes:
+
+1. `python run.py` must create a single-node kind cluster (name `mlserve`), build the images and `kind load` them, deploy
+   with the manifests in `k8s/`, run the scenarios against the cluster, and delete the cluster at the end (also on error).
+   `metrics.json` must report `execution_mode: "kind"`. Keep the local-process mode only behind `--local` (used by tests).
+2. Real Kubernetes events: pod kills via `kubectl delete pod` on a running replica; autoscaling via a real HPA
+   (metrics-server installed in the cluster with `--kubelet-insecure-tls`); canary via the gateway's weights with real
+   v1/v2 Deployments. Record `results/k8s_events_<scenario>.csv` with columns ts, object, event, source, where `source`
+   is `kubectl` for events read from the API server (`kubectl get events` / pod status) and `harness` for actions you
+   issued. HPA reaction time is measured from the load step to the new pod's Ready condition from the API server.
+3. Memory: the Docker VM has 4 GB. Use slim images (python:3.12-slim + onnxruntime, distroless/static Go, Rust on
+   debian-slim), resource requests/limits on every pod, at most 2 replicas per model by default (HPA max 4), and
+   Redpanda with `--smp 1 --memory 512M --overprovisioned`. Total images under 2.5 GB. Disk is tight (about 8 GB free):
+   prune only this project's own images at the end, never other images.
+4. Keep the existing criteria and thresholds. Load tests may be shorter if needed (podkill at least 10,000 requests per
+   mode, at least 5 kills). Report honestly if the cluster numbers miss a threshold.
+5. Go tests (`go test ./... -cover`) and Rust tests (`cargo test`) must pass; the evaluator runs them too.
+6. Every `results/loadtest_*.csv` row must have a non-empty `mode`: `gateway` | `naive` (podkill, spike), `gateway` |
+   `direct` with the same `row_id` for each pair (overhead, at least 500 pairs), `rust` | `python` (features). The canary
+   scenario must send a meaningful share to the bad v2 before rollback (at least 100 requests; weight starts at 10%).

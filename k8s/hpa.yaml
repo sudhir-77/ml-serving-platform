@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranking-hpa
+  namespace: ml-serving
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: ranking-hpa}
+  template:
+    metadata:
+      labels: {app: ranking-hpa}
+    spec:
+      containers:
+        - name: ranking
+          image: ml-ranking:local
+          imagePullPolicy: Never
+          ports: [{containerPort: 8000}]
+          env:
+            - {name: HOST, value: "0.0.0.0"}
+            - {name: PORT, value: "8000"}
+            - {name: MODEL_KIND, value: ranking}
+            - {name: MODEL_PATH, value: /models/ranking.onnx}
+            - {name: CPU_BURN_MS, value: "25"}
+            - {name: OMP_NUM_THREADS, value: "1"}
+          readinessProbe:
+            httpGet: {path: /health, port: 8000}
+            periodSeconds: 1
+          resources:
+            requests: {cpu: 200m, memory: 128Mi}
+            limits: {memory: 320Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranking-hpa
+  namespace: ml-serving
+spec:
+  selector: {app: ranking-hpa}
+  ports: [{port: 8000, targetPort: 8000}]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ranking-hpa
+  namespace: ml-serving
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ranking-hpa
+  minReplicas: 1
+  maxReplicas: 3
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 40

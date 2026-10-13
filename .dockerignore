@@ -1,0 +1,16 @@
+.venv
+.git
+.pytest_cache
+.mypy_cache
+.cursor
+results
+logs
+bin
+**/target
+**/__pycache__
+data/*
+!data/models/
+data/models/*
+!data/models/*.onnx
+*.md
+EVALUATION_*.md

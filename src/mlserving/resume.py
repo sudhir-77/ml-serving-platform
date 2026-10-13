@@ -20,14 +20,20 @@ def render_resume(report: dict) -> str:
     failed = round(float(m["canary_failed_frac"]) * 100.0, 3)
     hpa = round(float(m["hpa_reaction_s"]), 2)
     diff = float(m["onnx_max_abs_diff"])
+    offered = int(m.get("fs_offered_rps", 0))
+    where = (
+        "on a single-node kind Kubernetes cluster"
+        if m.get("execution_mode") == "kind"
+        else "on local processes that mirror a Kubernetes layout"
+    )
     lines = [
         "# Resume notes",
         "",
         "## Bullets",
         "",
         (
-            f"- Built a disaggregated model-serving stack on local processes that mirror a Kubernetes layout "
-            f"(Go gateway, Rust feature server, Docker-ready ONNX models), keeping {success}% of requests successful "
+            f"- Built a disaggregated model-serving stack {where} "
+            f"(Go gateway, Rust feature server, Dockerized ONNX models), keeping {success}% of requests successful "
             f"while one model replica was killed under load vs. {base}% for a naive proxy."
         ),
         (
@@ -36,7 +42,7 @@ def render_resume(report: dict) -> str:
         ),
         (
             f"- Wrote a Rust (tokio, axum) online feature server with an in-memory sharded store and TTL, "
-            f"measuring {fs_p99} ms p99 lookups at the 2,000 RPS feature scenario ({speedup}x the Python dict baseline)."
+            f"measuring {fs_p99} ms p99 lookups at the {offered:,} RPS feature scenario ({speedup}x the Python dict baseline)."
         ),
         (
             f"- Added a local autoscaler that brought up a ready replica {hpa} s after a load step, "

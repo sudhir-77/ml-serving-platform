@@ -17,6 +17,10 @@ def make_gateway_config(
     fetch_features: bool,
     canary_weight: float = 0.0,
     max_attempts: int | None = None,
+    canary_min_samples: int = 20,
+    canary_window_ms: int = 2000,
+    canary_error_threshold: float = 0.4,
+    breaker_failures: int = 3,
 ) -> dict:
     if mode not in {"gateway", "naive"}:
         raise ValueError("mode must be gateway or naive")
@@ -37,9 +41,9 @@ def make_gateway_config(
             "ranking": {
                 "backends": ranking_backends,
                 "canary_weight": canary_weight,
-                "canary_error_threshold": 0.4,
-                "canary_min_samples": 20,
-                "canary_window_ms": 2000,
+                "canary_error_threshold": canary_error_threshold,
+                "canary_min_samples": canary_min_samples,
+                "canary_window_ms": canary_window_ms,
             },
             "text": {
                 "backends": text_backends,
@@ -52,7 +56,7 @@ def make_gateway_config(
         "hedge_after_ms": 0 if mode == "naive" else hedge_after_ms,
         "request_timeout_ms": 2000,
         "max_attempts": attempts,
-        "breaker_failures": 3,
+        "breaker_failures": breaker_failures,
         "breaker_cooldown_ms": 800,
         "feature_cache_ms": 5000,
         "retry_base_ms": 1,
@@ -68,16 +72,20 @@ def make_workload(
     n: int,
     seed: int,
     texts: list[str] | None = None,
+    exhaustive: bool = False,
 ) -> list[dict]:
-    if n < 1:
+    if n < 1 and not exhaustive:
         raise ValueError("n must be positive")
     if len(row_ids) == 0:
         raise ValueError("no rows to sample")
     rng = np.random.default_rng(seed)
-    picks = rng.integers(0, len(row_ids), size=n)
+    if exhaustive:
+        picks = list(range(len(row_ids)))
+    else:
+        picks = rng.integers(0, len(row_ids), size=n).tolist()
     texts = texts or ["toy story"]
     rows = []
-    for request_id, pick in enumerate(picks.tolist()):
+    for request_id, pick in enumerate(picks):
         user_id = int(user_ids[pick])
         item_id = int(item_ids[pick])
         rows.append(

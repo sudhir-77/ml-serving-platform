@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+WORKDIR /app
+COPY models/requirements-serve.txt /tmp/requirements-serve.txt
+RUN pip install --no-cache-dir -r /tmp/requirements-serve.txt
+COPY src /app/src
+COPY models/server.py /app/server.py
+COPY models/feature_baseline.py /app/feature_baseline.py
+COPY data/models/ranking.onnx /models/ranking.onnx
+COPY data/models/text.onnx /models/text.onnx
+ENV PYTHONPATH=/app/src
+ENV HOST=0.0.0.0
+ENV MODEL_PATH=/models/ranking.onnx
+ENV OMP_NUM_THREADS=1
+EXPOSE 8000
+CMD ["python", "server.py"]

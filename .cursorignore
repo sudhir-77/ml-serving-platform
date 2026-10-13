@@ -1,0 +1,7 @@
+﻿featureserver/target/
+target/
+.venv/
+data/
+bin/
+mlruns/
+logs/

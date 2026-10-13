@@ -33,6 +33,7 @@ _input_name = ""
 _dtype = np.float32
 _kind = os.environ.get("MODEL_KIND", "ranking")
 _text_dim = int(os.environ.get("TEXT_DIM", "32"))
+_burn_ms = float(os.environ.get("CPU_BURN_MS", "0"))
 
 
 class PredictIn(BaseModel):
@@ -89,6 +90,8 @@ def predict(body: PredictIn):
         fail = err_rate > 0 and _rng.random() < err_rate
     if delay > 0:
         time.sleep(delay / 1000.0)
+    if _burn_ms > 0:
+        _busy_wait(_burn_ms)
     if fail:
         return JSONResponse({"error": "injected"}, status_code=500)
     if _session is None:
@@ -101,6 +104,15 @@ def predict(body: PredictIn):
     output = _session.run(None, {_input_name: array})[0]
     score = float(np.asarray(output).reshape(-1)[0])
     return {"score": score}
+
+
+def _busy_wait(ms: float) -> None:
+    end = time.perf_counter() + ms / 1000.0
+    value = 0
+    while time.perf_counter() < end:
+        value = (value + 1) & 0xFFFF
+    if value < 0:
+        raise RuntimeError("busy wait failed")
 
 
 def main() -> None:

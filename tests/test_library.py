@@ -22,6 +22,7 @@ from mlserving.data import (
 from mlserving.dict_store import DictFeatureStore, expiry
 from mlserving.features import feature_events, fit_aggregates, vector_for
 from mlserving.hardware import PeakTracker, hardware_snapshot
+from mlserving.events import EventLog, reaction_seconds
 from mlserving.metrics import (
     assemble_from_results,
     auth_reject_rate,
@@ -146,9 +147,6 @@ def test_mlp_onnx_parity_on_a_known_split():
     out = Path("data") / "test-models"
     result = train_ranking_arrays(users, items, ratings, timestamps, out, seed=0)
     assert result["onnx_max_abs_diff"] < 1e-5
-    x = np.array([[0.2, 0.1, 3.0, -0.1, 0.4, 3.5]])
-    coefs = [np.asarray(c, dtype=np.float64) for c in []]
-    del coefs
     # Numpy forward on the fitted weights is checked inside train_ranking_arrays.
     assert result["split_sizes"]["train"] + result["split_sizes"]["val"] + result["split_sizes"]["test"] == n
     text = train_text_model(["Toy Story", "Heat", "A drama"], np.array([0, 0, 1], dtype=np.float64), out)
@@ -171,6 +169,32 @@ def test_mlp_forward_single_relu_layer():
     assert pred[0] == pytest.approx(2.25)
     with pytest.raises(ValueError):
         max_abs_diff(np.array([1.0]), np.array([1.0, 2.0]))
+
+
+def test_event_log_records_harness_and_kubectl_sources(tmp_path: Path):
+    path = tmp_path / "k8s_events.csv"
+    log = EventLog(path)
+    log.add("rank,a", "pod_kill")
+    log.add("rank-c", "scale_out_ready", source="kubectl", ts=12.5)
+    log.close()
+    text = path.read_text(encoding="utf-8")
+    assert text.splitlines()[0] == "ts,object,event,source"
+    assert "rank-a,pod_kill,harness" in text
+    assert "12.500,rank-c,scale_out_ready,kubectl" in text
+
+
+def test_hpa_reaction_uses_api_server_ready_event():
+    rows = [
+        {"ts": "10.0", "object": "ranking", "event": "load_step", "source": "harness"},
+        {"ts": "10.5", "object": "ranking", "event": "scale_out_begin", "source": "harness"},
+        {"ts": "12.25", "object": "ranking-abc", "event": "scale_out_ready", "source": "kubectl"},
+        {"ts": "9.0", "object": "ranking-old", "event": "scale_out_ready", "source": "kubectl"},
+    ]
+    assert reaction_seconds(rows) == pytest.approx(2.25)
+    with pytest.raises(ValueError):
+        reaction_seconds([rows[0]])
+    with pytest.raises(ValueError):
+        reaction_seconds([rows[0], rows[3]])
 
 
 def test_metric_helpers_against_hand_values():
@@ -231,8 +255,8 @@ def test_assemble_and_criteria_from_fixture_files(tmp_path: Path):
     for i in range(10):
         overhead.append(row(i, "overhead", "gateway", 200, 6))
         overhead.append(row(i, "overhead", "direct", 200, 4))
-    features = [row(i, "features", "gateway", 200, 0.4) for i in range(30)]
-    features += [row(i, "features", "naive", 200, 2.0) for i in range(30)]
+    features = [row(i, "features", "rust", 200, 0.4) for i in range(30)]
+    features += [row(i, "features", "python", 200, 2.0) for i in range(30)]
     hpa = [row(i, "hpa", "gateway", 200, 10) for i in range(10)]
     canary = [row(i, "canary", "gateway", 200, 5) for i in range(100)]
     _write_load(tmp_path / "loadtest_podkill.csv", pod)
@@ -341,6 +365,8 @@ def test_config_and_workload_are_deterministic():
     rows = make_workload(np.array([1, 1]), np.array([2, 3]), np.array([0, 1]), aggregates, 5, seed=0)
     again = make_workload(np.array([1, 1]), np.array([2, 3]), np.array([0, 1]), aggregates, 5, seed=0)
     assert rows == again
+    once = make_workload(np.array([4, 5, 6]), np.array([7, 8, 9]), np.array([10, 11, 12]), aggregates, 1, seed=1, exhaustive=True)
+    assert [row["row_id"] for row in once] == [10, 11, 12]
     assert len(rows[0]["features"]) == 6
     assert desired_replicas(200, 80, 3) == 3
     assert desired_replicas(0, 80, 3) == 1

@@ -1,10 +1,10 @@
-# Disaggregated model serving, measured locally
+# Disaggregated model serving on kind
 
-A small disaggregated serving stack for ranking MovieLens ratings: a Go gateway, a Rust online feature server, and Python ONNX Runtime model processes. `python run.py` trains the models, starts the processes, injects faults, and writes `results/metrics.json` from the request logs. Traffic is generated. Nothing here is a production deployment.
+A small disaggregated serving stack for ranking MovieLens ratings: a Go gateway, a Rust online feature server, and Python ONNX Runtime model pods. `python run.py` trains the models, builds images, creates a single-node kind cluster named `mlserve`, runs fault scenarios, writes `results/metrics.json` from the request logs, and deletes the cluster. Traffic is generated. Nothing here is a production deployment.
 
 ## Setup
 
-Python 3.12, Go 1.27, and Rust 1.99 are required. The measured path does not start Docker.
+Python 3.12, Go 1.27, Rust 1.99, Docker, kind, and kubectl are required. The default command uses a local kind cluster.
 
 ```text
 python -m venv .venv
@@ -12,7 +12,7 @@ python -m venv .venv
 python run.py
 ```
 
-`python run.py --quick` runs the same stages on a small request count. The first run also compiles the Go and Rust binaries. Later quick runs are meant to finish in a few minutes. `--skip-build` reuses binaries that are already present.
+`python run.py --local` keeps every replica as a process on this machine. `python run.py --quick` implies `--local` and uses a small request count so it can finish in a few minutes once the Go and Rust binaries exist. `--skip-build` reuses binaries that are already present in local mode.
 
 ## Architecture
 
@@ -28,7 +28,7 @@ flowchart LR
   PY[Python dict feature baseline] -. compared with .-> FS
 ```
 
-Kubernetes manifests and a kind config live in `k8s/`. The default command does not create a cluster: the kind node image plus a Redpanda image would exceed the 1.5 GB download budget, and a 4 GB Docker VM would crowd the 3 GB process limit. The local processes are the replicas the benchmark kills, slows down, and scales out. `results/k8s_events_*.csv` records those actions.
+Kubernetes manifests and a kind config live in `k8s/`. The default command creates cluster `mlserve`, loads the local images, installs metrics-server with `--kubelet-insecure-tls`, and tears the cluster down at the end. `results/k8s_events_*.csv` records harness actions and rows read back from the API server (`source` is `harness` or `kubectl`).
 
 ## Design decisions
 
@@ -36,7 +36,7 @@ The ranking model is a scikit-learn MLP on user and item aggregates fit only on 
 
 The gateway keeps a short feature cache, picks the lower latency replica, hedges when the first replica is slow, and retries with jittered backoff. A canary with a high injected error rate is removed when its recent error rate crosses 0.4. The naive proxy forwards to one replica and does none of that. The Python baseline is a locked dict behind a threaded HTTP server, which is what the Rust lookup latency is compared with.
 
-The 5x spike is an injected service delay: 15 ms on a healthy replica and 75 ms on the replica the naive proxy uses. Pod kills are real process kills of that shared replica.
+The 5x spike is an injected service delay: 16 ms on a healthy replica and 80 ms on the replica the naive proxy uses. Pod kills are `kubectl delete pod` against one ranking replica. The canary deployment starts at weight 0.10 and answers half of its requests with HTTP 500 until the gateway rolls that weight back. The HPA scenario watches the API server until a second ranking pod is Ready.
 
 ## Dataset
 
@@ -85,4 +85,4 @@ Plots: `results/latency_podkill.png`, `results/latency_spike.png`, `results/succ
 
 ## Limitations
 
-Local processes stand in for pods. The HPA number is the time a controller takes to start another model process after a load step and mark it ready. It is not the Kubernetes metrics-server HPA. Redpanda is described in `k8s/stack.yaml`; the local feature server is fed by the same JSON event records the store applies, posted over HTTP, because this run does not download a broker image. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the sum of the process tree's RSS, which double-counts shared pages.
+The cluster is one kind node with a small CPU budget, so the load generator offers less traffic than a production gateway would. HPA reaction time includes metrics-server scrape delay and image startup, and it moves a little from run to run. Redpanda is deployed with `--smp 1` and a 384M memory cap; if it does not become ready the runner deletes that deployment and keeps the HTTP feature ingest, which is what the Rust and Python servers actually serve. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the Python process tree only; the Docker VM is separate and is not counted in `hardware.peak_rss_gb`.

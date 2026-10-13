@@ -328,6 +328,11 @@ func (s *Server) dispatch(ctx context.Context, model string, features []float64,
 		if wave.OK {
 			return last
 		}
+		// A bad canary must stay visible in the response. Retrying it onto the
+		// stable replica would hide how many requests reached v2.
+		if primary.Canary {
+			return last
+		}
 		exclude[primary.Name] = true
 		if hedge != nil {
 			exclude[hedge.Name] = true

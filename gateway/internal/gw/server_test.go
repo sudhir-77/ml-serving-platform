@@ -57,6 +57,51 @@ func TestGatewayUsesFeatureServerNotClientFeatures(t *testing.T) {
 	}
 }
 
+func TestCanaryFailureIsNotRetried(t *testing.T) {
+	var stableHits atomic.Int32
+	canarySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "injected", http.StatusInternalServerError)
+	}))
+	defer canarySrv.Close()
+	stable := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stableHits.Add(1)
+		writeScore(w, 1)
+	}))
+	defer stable.Close()
+	cfg := baseConfig(featuresURL(t), stable.URL, stable.URL)
+	cfg.FetchFeatures = false
+	cfg.HedgeAfterMs = 0
+	cfg.MaxAttempts = 3
+	cfg.Models["ranking"] = modelConfig{
+		Backends: []backendConfig{
+			{Name: "rank-b", URL: stable.URL},
+			{Name: "ranking-v2", URL: canarySrv.URL, Canary: true},
+		},
+		CanaryWeight:         1,
+		CanaryErrorThreshold: 0.99,
+		CanaryMinSamples:     50,
+		CanaryWindowMs:       60000,
+	}
+	gw := httptest.NewServer(New(cfg).Handler())
+	defer gw.Close()
+	res := postPredict(t, gw.URL, "rank-key", `{"model":"ranking","user_id":1,"item_id":1,"features":[1,2,3,4,5,6]}`)
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("canary error should surface, status %d body %s", res.StatusCode, body)
+	}
+	var got predictResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Backend != "ranking-v2" {
+		t.Fatalf("backend = %s, want ranking-v2", got.Backend)
+	}
+	if stableHits.Load() != 0 {
+		t.Fatalf("stable replica was called %d times", stableHits.Load())
+	}
+}
+
 func TestHedgePrefersTheFastReplica(t *testing.T) {
 	features := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"features": []float64{1, 0, 0, 0, 0, 0}})
