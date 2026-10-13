@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -28,6 +29,155 @@ TAGS = (
 
 def log(message: str) -> None:
     print(message, flush=True)
+
+
+def _docker_probe() -> tuple[bool, str]:
+    try:
+        proc = subprocess.run(
+            ["docker", "info", "--format", "{{.ServerVersion}} {{.OSType}}"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    text = (proc.stdout or "").strip()
+    if proc.returncode == 0 and text.split()[-1:] and text.split()[-1].lower() in {"linux", "windows"}:
+        return True, text
+    detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
+    return False, detail[-400:]
+
+
+def _docker_desktop_exe() -> Path | None:
+    roots = [
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
+        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
+        Path(os.environ.get("LocalAppData", "")) / "Programs",
+    ]
+    for root in roots:
+        candidate = root / "Docker" / "Docker" / "Docker Desktop.exe"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _launch_docker() -> None:
+    if os.name != "nt":
+        for args in (["systemctl", "start", "docker"], ["open", "-a", "Docker"]):
+            try:
+                subprocess.run(args, check=False, timeout=30)
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+        return
+    exe = _docker_desktop_exe()
+    if exe is not None:
+        log(f"starting {exe}")
+        os.startfile(exe)
+    else:
+        log("Docker Desktop.exe was not found; trying the Windows service")
+    subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Start-Service -Name com.docker.service -ErrorAction SilentlyContinue",
+        ],
+        check=False,
+        timeout=20,
+    )
+
+
+def _switch_linux_engine() -> None:
+    if os.name != "nt":
+        return
+    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+    cli = program_files / "Docker" / "Docker" / "DockerCli.exe"
+    if not cli.exists():
+        return
+    log("switching Docker to the Linux engine")
+    subprocess.run([str(cli), "-SwitchLinuxEngine"], check=False, timeout=90)
+
+
+def _engine_kind(detail: str) -> str:
+    parts = detail.split()
+    if not parts:
+        return ""
+    return parts[-1].lower()
+
+
+def _wsl_shutdown(timeout: float = 20.0) -> bool:
+    if os.name != "nt":
+        return False
+    log("running wsl --shutdown so Docker can start its engine")
+    try:
+        proc = subprocess.run(
+            ["wsl.exe", "--shutdown"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log("wsl --shutdown timed out")
+        return False
+    except OSError as exc:
+        log(f"wsl --shutdown failed: {exc}")
+        return False
+    log(f"wsl --shutdown exit {proc.returncode}")
+    return proc.returncode == 0
+
+
+def _engine_error(detail: str) -> bool:
+    text = detail.lower()
+    return any(token in text for token in ("wsl", "unable to start", "500 internal server error", "http 503"))
+
+
+def ensure_docker(timeout: float = 300.0) -> None:
+    """Start Docker Desktop when the engine is installed but stopped.
+
+    kind talks to the Linux engine pipe. A stopped daemon makes `kind create`
+    fail before any scenario can write results. If Docker reports that WSL is
+    stuck, shut WSL down once and start the engine again.
+    """
+    ok, detail = _docker_probe()
+    if ok and _engine_kind(detail) == "linux":
+        log(f"docker daemon is ready ({detail})")
+        return
+    if ok and _engine_kind(detail) == "windows":
+        log(f"docker is in Windows container mode ({detail})")
+        _switch_linux_engine()
+    else:
+        log("docker daemon is not running; starting Docker Desktop")
+        _launch_docker()
+    deadline = time.time() + timeout
+    last = detail
+    switched = False
+    recovered_wsl = False
+    while time.time() < deadline:
+        time.sleep(3)
+        ok, last = _docker_probe()
+        if ok and _engine_kind(last) == "linux":
+            log(f"docker daemon is ready ({last})")
+            return
+        if ok and _engine_kind(last) == "windows" and not switched:
+            _switch_linux_engine()
+            switched = True
+            continue
+        if _engine_error(last) and not recovered_wsl:
+            recovered_wsl = True
+            if not _wsl_shutdown():
+                break
+            _launch_docker()
+    raise RuntimeError(
+        "Docker's Linux engine did not become ready. If WSL is unresponsive, "
+        "restart it from an elevated PowerShell with: Restart-Service WSLService. "
+        f"Last docker error: {last}"
+    )
 
 
 class Cluster:
@@ -60,6 +210,7 @@ class Cluster:
 
     def up(self) -> None:
         self.logs.mkdir(parents=True, exist_ok=True)
+        ensure_docker()
         self._delete_cluster()
         self.stream(
             ["kind", "create", "cluster", "--name", CLUSTER, "--config", str(self.root / "k8s" / "kind-config.yaml")],

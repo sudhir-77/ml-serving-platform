@@ -4,7 +4,7 @@ A small disaggregated serving stack for ranking MovieLens ratings: a Go gateway,
 
 ## Setup
 
-Python 3.12, Go 1.27, Rust 1.99, Docker, kind, and kubectl are required. The default command uses a local kind cluster.
+Python 3.12, Go 1.27, Rust 1.99, Docker, kind, and kubectl are required. The default command uses a local kind cluster. If Docker Desktop is installed and the engine is stopped, `python run.py` starts it and waits until `docker info` reports a Linux engine before creating the cluster.
 
 ```text
 python -m venv .venv
@@ -85,4 +85,4 @@ Plots: `results/latency_podkill.png`, `results/latency_spike.png`, `results/succ
 
 ## Limitations
 
-The cluster is one kind node with a small CPU budget, so the load generator offers less traffic than a production gateway would. HPA reaction time includes metrics-server scrape delay and image startup, and it moves a little from run to run. Redpanda is deployed with `--smp 1` and a 384M memory cap; if it does not become ready the runner deletes that deployment and keeps the HTTP feature ingest, which is what the Rust and Python servers actually serve. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the Python process tree only; the Docker VM is separate and is not counted in `hardware.peak_rss_gb`.
+The cluster is one kind node with a small CPU budget, so the load generator offers less traffic than a production gateway would. `python run.py` starts Docker Desktop when the engine is stopped; kind still needs a responsive WSL2 backend, and a wedged WSL service has to be restarted before the cluster can be created. HPA reaction time includes metrics-server scrape delay and image startup, and it moves a little from run to run. Redpanda is deployed with `--smp 1` and a 384M memory cap; if it does not become ready the runner deletes that deployment and keeps the HTTP feature ingest, which is what the Rust and Python servers actually serve. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the Python process tree only; the Docker VM is separate and is not counted in `hardware.peak_rss_gb`.
