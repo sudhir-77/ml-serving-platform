@@ -23,3 +23,6 @@ coverage.out
 cover.out
 coverage
 *.prof
+
+# local evaluator reports
+EVALUATION_*.md
