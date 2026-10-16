@@ -7,6 +7,8 @@ import json
 import math
 from pathlib import Path
 
+from mlserving.events import reaction_seconds
+
 
 def percentile(values: list[float], q: float) -> float:
     """Linear percentile, NumPy's default (Hyndman-Fan type 7), q in [0, 100]."""
@@ -127,12 +129,13 @@ def assemble_from_results(results: Path) -> dict[str, float | int | str | bool]:
     canary_rows = read_csv(results / "loadtest_canary.csv")
     parity_rows = read_csv(results / "onnx_parity.csv")
     auth_rows = read_csv(results / "auth_matrix.csv")
-    hpa_meta = _load_json(results / "hpa_meta.json")
     canary_meta = _load_json(results / "canary_meta.json")
     train_meta = _load_json(results / "train_meta.json")
     cover_meta = _load_json(results / "coverage_meta.json")
     run_meta_path = results / "run_meta.json"
     run_meta = _load_json(run_meta_path) if run_meta_path.exists() else {}
+    hpa_events_path = results / "k8s_events_hpa.csv"
+    hpa_meta_path = results / "hpa_meta.json"
 
     gw_kill = filter_rows(podkill, "podkill", "gateway")
     naive_kill = filter_rows(podkill, "podkill", "naive")
@@ -153,29 +156,40 @@ def assemble_from_results(results: Path) -> dict[str, float | int | str | bool]:
     onnx_diff = parity_max_abs(parity_rows)
     auth_rate = auth_reject_rate(auth_rows)
     overhead_p95 = paired_overhead_p95(overhead)
-    hpa_reaction = float(hpa_meta["hpa_reaction_s"])
+    # Prefer recomputing from the event CSV so metrics.json matches independent reproduction.
+    hpa_reaction = None
+    if hpa_events_path.exists():
+        try:
+            hpa_reaction = float(reaction_seconds(read_csv(hpa_events_path)))
+        except ValueError:
+            hpa_reaction = None
+    if hpa_reaction is None:
+        hpa_reaction = float(_load_json(hpa_meta_path)["hpa_reaction_s"])
     slo = hpa_slo_attainment(hpa_rows)
     rollback_s = float(canary_meta["canary_rollback_s"])
     failed = 1.0 - success_rate(canary_gw)
+    canary_v2 = sum(1 for row in canary_gw if "v2" in row.get("backend_final", ""))
 
     return {
         "success_rate_podkill": success_gw,
         "success_rate_podkill_naive": success_naive,
         "success_rate_podkill_pct": round(success_gw * 100.0, 2),
         "success_rate_podkill_naive_pct": round(success_naive * 100.0, 2),
-        "p99_spike_ms": p99_gw,
-        "p99_spike_naive_ms": p99_naive,
+        "p99_spike_ms": round(p99_gw, 6),
+        "p99_spike_naive_ms": round(p99_naive, 6),
         "p99_cut": cut,
         "p99_cut_pct": round(cut * 100.0, 2),
-        "p95_overhead_ms": overhead_p95,
-        "fs_p99_ms": fs_p99,
-        "fs_python_p99_ms": fs_py,
+        "p95_overhead_ms": round(overhead_p95, 6),
+        "fs_p99_ms": round(fs_p99, 6),
+        "fs_python_p99_ms": round(fs_py, 6),
         "fs_speedup": speedup,
         "fs_speedup_rounded": round(speedup, 2),
-        "hpa_reaction_s": hpa_reaction,
-        "hpa_slo_attainment": slo,
-        "canary_rollback_s": rollback_s,
+        "hpa_reaction_s": round(hpa_reaction, 6),
+        "hpa_slo_attainment": round(slo, 6),
+        "canary_rollback_s": round(rollback_s, 6),
         "canary_failed_frac": failed,
+        "canary_failed_pct": round(failed * 100.0, 4),
+        "canary_v2_requests": canary_v2,
         "onnx_max_abs_diff": onnx_diff,
         "auth_reject_rate": auth_rate,
         "test_rmse": float(train_meta["test_rmse"]),
@@ -183,7 +197,9 @@ def assemble_from_results(results: Path) -> dict[str, float | int | str | bool]:
         "go_coverage": float(cover_meta["go_coverage"]),
         "python_coverage": float(cover_meta["python_coverage"]),
         "rust_tests_passed": bool(cover_meta["rust_tests_passed"]),
-        "execution_mode": str(train_meta.get("execution_mode", "local_processes")),
+        "execution_mode": str(
+            run_meta.get("execution_mode") or train_meta.get("execution_mode", "local_processes")
+        ),
         "fs_offered_rps": int(run_meta.get("fs_offered_rps", 2000)),
         "train_rows": int(train_meta["splits"]["movielens_100k"]["train"]),
         "val_rows": int(train_meta["splits"]["movielens_100k"]["val"]),

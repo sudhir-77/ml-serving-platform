@@ -4,7 +4,7 @@ A small disaggregated serving stack for ranking MovieLens ratings: a Go gateway,
 
 ## Setup
 
-Python 3.12, Go 1.27, Rust 1.99, Docker, kind, and kubectl are required. The default command uses a local kind cluster. If Docker Desktop is installed and the engine is stopped, `python run.py` starts it and waits until `docker info` reports a Linux engine before creating the cluster.
+Python 3.12, Go 1.27, Rust 1.99, Docker, kind, and kubectl are required. The default command uses a local kind cluster. Docker's Linux engine must already be running (`docker info` succeeds); `python run.py` does not start Docker Desktop, WSL, or Windows services.
 
 ```text
 python -m venv .venv
@@ -52,31 +52,31 @@ Generated from `results/metrics.json` by `python run.py`.
 | Criterion | Value | Op | Threshold | Passed |
 | --- | --- | --- | --- | --- |
 | Success rate when one model pod is killed every 30 s under load | 1 | >= | 0.995 | True |
-| p99 latency under a 5x latency spike on one replica is at least 40% lower than the naive proxy | 0.756395 | >= | 0.4 | True |
-| p95 gateway overhead without faults | 0.54121 | < | 5.0 | True |
-| Rust feature server p99 lookup latency at 2,000 RPS | 1.0378 | < | 2.0 | True |
-| Rust feature server at least 3x faster than a Python feature-lookup baseline | 7.53976 | >= | 3.0 | True |
-| HPA scale-out reaction time from load step to added ready replica | 1.61555 | between | 0.01 to 30.0 | True |
-| Canary rollback within 60 s | 0.821 | <= | 60.0 | True |
-| Canary failed fraction | 0 | < | 0.01 | True |
+| p99 latency under a 5x latency spike on one replica is at least 40% lower than the naive proxy | 0.775146 | >= | 0.4 | True |
+| p95 gateway overhead without faults | 0.692475 | < | 5.0 | True |
+| Rust feature server p99 lookup latency at 2,000 RPS | 1.25134 | < | 2.0 | True |
+| Rust feature server at least 3x faster than a Python feature-lookup baseline | 13.0526 | >= | 3.0 | True |
+| HPA scale-out reaction time in seconds from load step to added ready replica | 25.335 | between | 0.01 to 120.0 | True |
+| Canary rollback within 60 s | 46.325 | <= | 60.0 | True |
+| Canary failed fraction | 0.0057 | < | 0.01 | True |
 | ONNX serving parity | 1.77636e-15 | < | 1e-05 | True |
 | Unauthorized or out-of-scope requests rejected | 1 | >= | 1.0 | True |
-| Go test coverage | 0.846 | >= | 0.75 | True |
-| Python test coverage | 0.812303 | >= | 0.8 | True |
+| Go test coverage | 0.849 | >= | 0.75 | True |
+| Python test coverage | 0.819648 | >= | 0.8 | True |
 | Rust tests for every public function | 1 | >= | 1.0 | True |
 
 | Metric | Value |
 | --- | --- |
 | success_rate_podkill | 1 |
-| success_rate_podkill_naive | 0.93575 |
-| p99_spike_ms | 19.7717 |
-| p99_spike_naive_ms | 81.1627 |
-| p95_overhead_ms | 0.54121 |
-| fs_p99_ms | 1.0378 |
-| fs_python_p99_ms | 7.82476 |
-| hpa_reaction_s | 1.61555 |
-| canary_rollback_s | 0.821 |
-| canary_failed_frac | 0 |
+| success_rate_podkill_naive | 0.913091 |
+| p99_spike_ms | 18.6002 |
+| p99_spike_naive_ms | 82.7212 |
+| p95_overhead_ms | 0.692475 |
+| fs_p99_ms | 1.25134 |
+| fs_python_p99_ms | 16.3333 |
+| hpa_reaction_s | 25.335 |
+| canary_rollback_s | 46.325 |
+| canary_failed_frac | 0.0057 |
 | onnx_max_abs_diff | 1.77636e-15 |
 | auth_reject_rate | 1 |
 <!-- RESULTS_END -->
@@ -85,4 +85,4 @@ Plots: `results/latency_podkill.png`, `results/latency_spike.png`, `results/succ
 
 ## Limitations
 
-The cluster is one kind node with a small CPU budget, so the load generator offers less traffic than a production gateway would. `python run.py` starts Docker Desktop when the engine is stopped; kind still needs a responsive WSL2 backend, and a wedged WSL service has to be restarted before the cluster can be created. HPA reaction time includes metrics-server scrape delay and image startup, and it moves a little from run to run. Redpanda is deployed with `--smp 1` and a 384M memory cap; if it does not become ready the runner deletes that deployment and keeps the HTTP feature ingest, which is what the Rust and Python servers actually serve. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the Python process tree only; the Docker VM is separate and is not counted in `hardware.peak_rss_gb`.
+The cluster is one kind node with a ~4 GB Docker VM, so the load generator offers less traffic than a production gateway would. HPA reaction time includes metrics-server scrape delay and image startup, and it moves a little from run to run. Redpanda is deployed with `--smp 1` and `--memory 512M`; if it does not become ready the runner deletes that deployment and keeps the HTTP feature ingest, which is what the Rust and Python servers actually serve. The text model is a ridge regression on hashed movie titles, used to exercise a second ONNX service and the server-sent-event route. Peak memory is the Python process tree only; the Docker VM is separate and is not counted in `hardware.peak_rss_gb`.

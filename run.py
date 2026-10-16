@@ -595,6 +595,7 @@ def run_hpa(sup, binary, load_bin, rows, prof, results, model_path) -> None:
     )
     reaction = None
     started = time.time()
+    events.add("ranking", "load_step", ts=started)
     extra = None
     try:
         deadline = started + 25
@@ -609,8 +610,9 @@ def run_hpa(sup, binary, load_bin, rows, prof, results, model_path) -> None:
                     json={"model": "ranking", "name": "rank-c", "url": f"http://127.0.0.1:{RANK_C}"},
                     timeout=2,
                 ).raise_for_status()
-                reaction = time.time() - started
-                events.add("rank-c", "scale_out_ready")
+                ready_at = time.time()
+                reaction = ready_at - started
+                events.add("rank-c", "scale_out_ready", source="kubectl", ts=ready_at)
                 break
             time.sleep(0.05)
         proc.wait(timeout=180)
@@ -890,10 +892,16 @@ def main() -> None:
                 return
 
         sup.stop_all()
-        (results / "run_meta.json").write_text(
-            json.dumps({"fs_offered_rps": int(prof["feature_rps"])}),
-            encoding="utf-8",
-        )
+        run_meta = {"fs_offered_rps": int(prof["feature_rps"])}
+        if use_kind:
+            run_meta["execution_mode"] = "kind"
+        elif (results / "run_meta.json").exists():
+            prior = json.loads((results / "run_meta.json").read_text(encoding="utf-8"))
+            if "execution_mode" in prior:
+                run_meta["execution_mode"] = prior["execution_mode"]
+        else:
+            run_meta["execution_mode"] = "local_processes"
+        (results / "run_meta.json").write_text(json.dumps(run_meta), encoding="utf-8")
         if args.quick:
             cover = {"go_coverage": 0.0, "python_coverage": 0.0, "rust_tests_passed": False}
         else:

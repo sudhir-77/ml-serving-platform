@@ -29,8 +29,8 @@ spec:
             httpGet: {path: /health, port: 8080}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 32Mi}
-            limits: {memory: 128Mi}
+            requests: {cpu: 20m, memory: 24Mi}
+            limits: {cpu: 500m, memory: 96Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -68,8 +68,8 @@ spec:
             httpGet: {path: /health, port: 8080}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 32Mi}
-            limits: {memory: 128Mi}
+            requests: {cpu: 20m, memory: 24Mi}
+            limits: {cpu: 500m, memory: 96Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -110,8 +110,8 @@ spec:
             httpGet: {path: /health, port: 8000}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {memory: 320Mi}
+            requests: {cpu: 30m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 192Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -151,8 +151,8 @@ spec:
             httpGet: {path: /health, port: 8000}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {memory: 320Mi}
+            requests: {cpu: 30m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 192Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -194,8 +194,8 @@ spec:
             httpGet: {path: /health, port: 8000}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 128Mi}
-            limits: {memory: 320Mi}
+            requests: {cpu: 30m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 192Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -235,8 +235,8 @@ spec:
             httpGet: {path: /health, port: 8000}
             periodSeconds: 2
           resources:
-            requests: {cpu: 20m, memory: 96Mi}
-            limits: {memory: 256Mi}
+            requests: {cpu: 20m, memory: 48Mi}
+            limits: {cpu: 300m, memory: 128Mi}
 ---
 apiVersion: v1
 kind: Service
@@ -271,8 +271,8 @@ spec:
             httpGet: {path: /health, port: 8080}
             periodSeconds: 2
           resources:
-            requests: {cpu: 50m, memory: 32Mi}
-            limits: {memory: 128Mi}
+            requests: {cpu: 20m, memory: 24Mi}
+            limits: {cpu: 400m, memory: 96Mi}
           volumeMounts:
             - {name: config, mountPath: /config, readOnly: true}
       volumes:
@@ -312,8 +312,8 @@ spec:
             httpGet: {path: /health, port: 8080}
             periodSeconds: 2
           resources:
-            requests: {cpu: 20m, memory: 32Mi}
-            limits: {memory: 128Mi}
+            requests: {cpu: 20m, memory: 24Mi}
+            limits: {cpu: 300m, memory: 96Mi}
           volumeMounts:
             - {name: config, mountPath: /config, readOnly: true}
       volumes:
@@ -346,8 +346,8 @@ spec:
       volumeMounts:
         - {name: work, mountPath: /work}
       resources:
-        requests: {cpu: 50m, memory: 32Mi}
-        limits: {memory: 256Mi}
+        requests: {cpu: 30m, memory: 32Mi}
+        limits: {cpu: 500m, memory: 128Mi}
   volumes:
     - name: work
       emptyDir: {}
@@ -367,8 +367,8 @@ spec:
     spec:
       containers:
         - name: redpanda
-          image: redpandadata/redpanda:v24.2.11
-          imagePullPolicy: IfNotPresent
+          image: ml-redpanda:local
+          imagePullPolicy: Never
           command:
             - redpanda
             - start
@@ -376,7 +376,7 @@ spec:
             - --smp
             - "1"
             - --memory
-            - 384M
+            - 512M
             - --reserve-memory
             - 0M
             - --node-id
@@ -387,8 +387,8 @@ spec:
             - internal://redpanda:9092
           ports: [{containerPort: 9092}]
           resources:
-            requests: {cpu: 50m, memory: 384Mi}
-            limits: {memory: 512Mi}
+            requests: {cpu: 50m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
 ---
 apiVersion: v1
 kind: Service

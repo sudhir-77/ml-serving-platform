@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import threading
 import time
@@ -24,14 +23,23 @@ TAGS = (
     "ml-gateway:local",
     "ml-featureserver:local",
     "ml-loadgen:local",
+    "ml-metrics-server:local",
+    "ml-redpanda:local",
 )
+METRICS_SERVER_IMAGE = "registry.k8s.io/metrics-server/metrics-server:v0.7.2"
+REDPANDA_IMAGE = "redpandadata/redpanda:v24.2.11"
 
 
 def log(message: str) -> None:
     print(message, flush=True)
 
 
-def _docker_probe() -> tuple[bool, str]:
+def require_docker() -> None:
+    """Exit clearly when the Linux Docker engine is not already running.
+
+    Never starts Docker Desktop, Windows services, or WSL. The evaluator keeps
+    the engine up; this only checks readiness.
+    """
     try:
         proc = subprocess.run(
             ["docker", "info", "--format", "{{.ServerVersion}} {{.OSType}}"],
@@ -43,140 +51,20 @@ def _docker_probe() -> tuple[bool, str]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, str(exc)
+        raise RuntimeError(
+            "docker info failed. Start Docker Desktop yourself and re-run "
+            f"python run.py. Detail: {exc}"
+        ) from exc
     text = (proc.stdout or "").strip()
-    if proc.returncode == 0 and text.split()[-1:] and text.split()[-1].lower() in {"linux", "windows"}:
-        return True, text
-    detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()
-    return False, detail[-400:]
-
-
-def _docker_desktop_exe() -> Path | None:
-    roots = [
-        Path(os.environ.get("ProgramFiles", r"C:\Program Files")),
-        Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")),
-        Path(os.environ.get("LocalAppData", "")) / "Programs",
-    ]
-    for root in roots:
-        candidate = root / "Docker" / "Docker" / "Docker Desktop.exe"
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _launch_docker() -> None:
-    if os.name != "nt":
-        for args in (["systemctl", "start", "docker"], ["open", "-a", "Docker"]):
-            try:
-                subprocess.run(args, check=False, timeout=30)
-            except (OSError, subprocess.TimeoutExpired):
-                continue
+    parts = text.split()
+    if proc.returncode == 0 and parts and parts[-1].lower() == "linux":
+        log(f"docker daemon is ready ({text})")
         return
-    exe = _docker_desktop_exe()
-    if exe is not None:
-        log(f"starting {exe}")
-        os.startfile(exe)
-    else:
-        log("Docker Desktop.exe was not found; trying the Windows service")
-    subprocess.run(
-        [
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Start-Service -Name com.docker.service -ErrorAction SilentlyContinue",
-        ],
-        check=False,
-        timeout=20,
-    )
-
-
-def _switch_linux_engine() -> None:
-    if os.name != "nt":
-        return
-    program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-    cli = program_files / "Docker" / "Docker" / "DockerCli.exe"
-    if not cli.exists():
-        return
-    log("switching Docker to the Linux engine")
-    subprocess.run([str(cli), "-SwitchLinuxEngine"], check=False, timeout=90)
-
-
-def _engine_kind(detail: str) -> str:
-    parts = detail.split()
-    if not parts:
-        return ""
-    return parts[-1].lower()
-
-
-def _wsl_shutdown(timeout: float = 20.0) -> bool:
-    if os.name != "nt":
-        return False
-    log("running wsl --shutdown so Docker can start its engine")
-    try:
-        proc = subprocess.run(
-            ["wsl.exe", "--shutdown"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        log("wsl --shutdown timed out")
-        return False
-    except OSError as exc:
-        log(f"wsl --shutdown failed: {exc}")
-        return False
-    log(f"wsl --shutdown exit {proc.returncode}")
-    return proc.returncode == 0
-
-
-def _engine_error(detail: str) -> bool:
-    text = detail.lower()
-    return any(token in text for token in ("wsl", "unable to start", "500 internal server error", "http 503"))
-
-
-def ensure_docker(timeout: float = 300.0) -> None:
-    """Start Docker Desktop when the engine is installed but stopped.
-
-    kind talks to the Linux engine pipe. A stopped daemon makes `kind create`
-    fail before any scenario can write results. If Docker reports that WSL is
-    stuck, shut WSL down once and start the engine again.
-    """
-    ok, detail = _docker_probe()
-    if ok and _engine_kind(detail) == "linux":
-        log(f"docker daemon is ready ({detail})")
-        return
-    if ok and _engine_kind(detail) == "windows":
-        log(f"docker is in Windows container mode ({detail})")
-        _switch_linux_engine()
-    else:
-        log("docker daemon is not running; starting Docker Desktop")
-        _launch_docker()
-    deadline = time.time() + timeout
-    last = detail
-    switched = False
-    recovered_wsl = False
-    while time.time() < deadline:
-        time.sleep(3)
-        ok, last = _docker_probe()
-        if ok and _engine_kind(last) == "linux":
-            log(f"docker daemon is ready ({last})")
-            return
-        if ok and _engine_kind(last) == "windows" and not switched:
-            _switch_linux_engine()
-            switched = True
-            continue
-        if _engine_error(last) and not recovered_wsl:
-            recovered_wsl = True
-            if not _wsl_shutdown():
-                break
-            _launch_docker()
+    detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).strip()[-400:]
     raise RuntimeError(
-        "Docker's Linux engine did not become ready. If WSL is unresponsive, "
-        "restart it from an elevated PowerShell with: Restart-Service WSLService. "
-        f"Last docker error: {last}"
+        "Docker's Linux engine is not ready (docker info failed). "
+        "Start Docker Desktop yourself and re-run python run.py. "
+        f"Detail: {detail or 'no output'}"
     )
 
 
@@ -210,26 +98,24 @@ class Cluster:
 
     def up(self) -> None:
         self.logs.mkdir(parents=True, exist_ok=True)
-        ensure_docker()
+        require_docker()
         self._delete_cluster()
         self.stream(
             ["kind", "create", "cluster", "--name", CLUSTER, "--config", str(self.root / "k8s" / "kind-config.yaml")],
             timeout=420,
         )
-        self.kubectl(
-            ["taint", "nodes", "--all", "node-role.kubernetes.io/control-plane-", "node-role.kubernetes.io/master-"],
-            check=False,
-            timeout=30,
-        )
+        self._untaint_control_plane()
         self._build_and_load()
+        self.kubectl(["create", "namespace", NS], check=False, timeout=30)
         self._put_config("gateway-config", self._config("gateway", self._pair(), hedge=8))
         self._put_config("naive-config", self._config("naive", [self._backend("ranking-a", "ranking-a")], hedge=0))
+        # metrics-server first so the image pull and APIService register before the app pods.
         self.kubectl(["apply", "-f", str(self.root / "k8s" / "metrics-server.yaml")], timeout=120)
+        self._wait_rollout("kube-system", "metrics-server", timeout=300)
         self.kubectl(["apply", "-f", str(self.root / "k8s" / "stack.yaml")], timeout=120)
         for name in ("featureserver", "pyfeatures", "ranking-a", "ranking-b", "ranking-v2", "text-model", "gateway", "naive"):
-            self.rollout(name)
+            self.rollout(name, timeout=240)
         self.kubectl(["-n", NS, "wait", "pod/loadgen", "--for=condition=Ready", "--timeout=180s"], timeout=200)
-        self.kubectl(["-n", "kube-system", "rollout", "status", "deployment/metrics-server", "--timeout=180s"], timeout=200)
         for url in (
             "http://127.0.0.1:30080/health",
             "http://127.0.0.1:30081/health",
@@ -248,7 +134,52 @@ class Cluster:
                 subprocess.run(["docker", "rmi", tag], check=False, timeout=60)
 
     def rollout(self, name: str, timeout: int = 180) -> None:
-        self.kubectl(["-n", NS, "rollout", "status", f"deployment/{name}", f"--timeout={timeout}s"], timeout=timeout + 30)
+        self._wait_rollout(NS, name, timeout=timeout)
+
+    def _wait_rollout(self, namespace: str, name: str, timeout: int = 180) -> None:
+        proc = self.kubectl(
+            ["-n", namespace, "rollout", "status", f"deployment/{name}", f"--timeout={timeout}s"],
+            timeout=timeout + 30,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return
+        describe = self.kubectl(
+            ["-n", namespace, "describe", "deployment", name],
+            check=False,
+            timeout=30,
+        )
+        pods = self.kubectl(
+            ["-n", namespace, "get", "pods", "-o", "wide"],
+            check=False,
+            timeout=30,
+        )
+        detail = (proc.stderr or proc.stdout or "").strip()
+        logs = self.kubectl(
+            ["-n", namespace, "logs", f"deploy/{name}", "--tail=80"],
+            check=False,
+            timeout=30,
+        )
+        raise RuntimeError(
+            f"rollout {namespace}/{name} failed: {detail[-500:]}\n"
+            f"{(describe.stdout or '')[-1200:]}\n{(pods.stdout or '')[-800:]}\n"
+            f"logs:\n{(logs.stdout or logs.stderr or '')[-1200:]}"
+        )
+
+    def _untaint_control_plane(self) -> None:
+        """Best-effort untaint; kind already clears the single-node control plane."""
+        proc = self.kubectl(
+            ["taint", "nodes", "--all", "node-role.kubernetes.io/control-plane-", "node-role.kubernetes.io/master-"],
+            check=False,
+            timeout=30,
+        )
+        if proc.returncode == 0:
+            return
+        detail = ((proc.stderr or "") + "\n" + (proc.stdout or "")).lower()
+        if "not found" in detail:
+            log("control-plane taint already absent; continuing")
+            return
+        log(f"untaint skipped: {(proc.stderr or proc.stdout or '').strip()[-200:]}")
 
     def _delete_cluster(self) -> None:
         listed = subprocess.run(["kind", "get", "clusters"], capture_output=True, text=True, timeout=30, check=False)
@@ -265,7 +196,50 @@ class Cluster:
         )
         for dockerfile, tag, context in builds:
             self.stream(["docker", "build", "-f", dockerfile, "-t", tag, context], timeout=1800)
-            self.stream(["kind", "load", "docker-image", tag, "--name", CLUSTER], timeout=420)
+            self._kind_load(tag)
+        # Rebuild FROM the registry image so the local tag is a single-platform image
+        # kind can import (multi-arch indexes fail ctr import on this Docker Desktop setup).
+        for dockerfile, tag in (
+            ("k8s/Dockerfile.metrics-server", "ml-metrics-server:local"),
+            ("k8s/Dockerfile.redpanda", "ml-redpanda:local"),
+        ):
+            self.stream(
+                [
+                    "docker",
+                    "build",
+                    "--platform",
+                    "linux/amd64",
+                    "--provenance=false",
+                    "--sbom=false",
+                    "-f",
+                    dockerfile,
+                    "-t",
+                    tag,
+                    "k8s",
+                ],
+                timeout=900,
+            )
+            self._kind_load(tag)
+
+    def _kind_load(self, tag: str) -> None:
+        last: Exception | None = None
+        archive = self.logs / f"{tag.replace(':', '_').replace('/', '_')}.tar"
+        for attempt in range(1, 4):
+            try:
+                self.stream(["docker", "save", "-o", str(archive), tag], timeout=300)
+                self.stream(
+                    ["kind", "load", "image-archive", str(archive), "--name", CLUSTER],
+                    timeout=420,
+                )
+                archive.unlink(missing_ok=True)
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                last = exc
+                log(f"kind load {tag} attempt {attempt} failed; retrying")
+                time.sleep(2)
+            finally:
+                archive.unlink(missing_ok=True)
+        raise RuntimeError(f"kind load failed for {tag}") from last
 
     def _release_redpanda_if_unready(self) -> None:
         proc = self.kubectl(
@@ -550,6 +524,8 @@ def _features(cluster: Cluster, prof: dict) -> None:
         _concat([rust, python], cluster.results / "loadtest_features.csv")
         modes = sorted({row["mode"] for row in read_csv(cluster.results / "loadtest_features.csv")})
         log(f"feature modes {modes}")
+        if modes != ["python", "rust"]:
+            raise RuntimeError(f"feature modes must be rust and python, got {modes}")
         cluster.append_api_events(events)
     finally:
         events.close()
@@ -688,8 +664,8 @@ def _hpa(cluster: Cluster, prof: dict) -> None:
         events.close()
         cluster.kubectl(["-n", NS, "delete", "hpa", "ranking-hpa", "--wait=false"], check=False)
         cluster.kubectl(["-n", NS, "delete", "deployment", "ranking-hpa", "--wait=false"], check=False)
-    reaction = round(reaction_seconds(read_csv(cluster.results / "k8s_events_hpa.csv")), 3)
-    log(f"hpa reaction {reaction}s")
+    reaction = reaction_seconds(read_csv(cluster.results / "k8s_events_hpa.csv"))
+    log(f"hpa reaction {reaction:.6g}s")
     (cluster.results / "hpa_meta.json").write_text(json.dumps({"hpa_reaction_s": reaction}), encoding="utf-8")
 
 

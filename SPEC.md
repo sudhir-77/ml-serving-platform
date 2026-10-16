@@ -114,3 +114,8 @@ with a 4 GB WSL VM cap, and kind v0.33 + kubectl v1.37 are installed. Required c
 6. Every `results/loadtest_*.csv` row must have a non-empty `mode`: `gateway` | `naive` (podkill, spike), `gateway` |
    `direct` with the same `row_id` for each pair (overhead, at least 500 pairs), `rust` | `python` (features). The canary
    scenario must send a meaningful share to the bad v2 before rollback (at least 100 requests; weight starts at 10%).
+
+
+## Environment rule (2026-10-15, overrides earlier sections; reviewer)
+Never start, stop or restart Docker Desktop, WSL (wsl --shutdown, wsl --terminate) or any Windows service from project code or from your own commands. If `docker info` fails, exit with a clear error message instead. The reviewer keeps Docker running.
+
